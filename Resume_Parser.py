@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 from groq import Groq
 from pydantic import BaseModel
 import json
+from pypdf import PdfReader
+from docx import Document
+import time
 
 load_dotenv()
 
@@ -25,9 +28,6 @@ class Jobd(BaseModel):
     responsibilities: list[str]
 
 Job_Schema=Jobd.model_json_schema()
-
-
-
 User_Prompt="""We are looking for an enthusiastic AI Intern who wants to gain practical experience in Artificial Intelligence, Machine Learning, and AI-based application development. The intern will work on real-world projects and collaborate with the technical team.
 
 Key Responsibilities
@@ -76,7 +76,9 @@ System_Prompt=f"""
 Role: act as a hr for a IT Company
 Task: your task is fetch the job description and give the response accoding to the {Job_Schema}
 Constraints:Fetch all detail from the Job description not invent anything,Do NOT return the schema itself.Do NOT return fields like "properties", "title" or "type".
-Fill the schema with actual information extracted from the job description.
+Fill the schema with actual information extracted from the job description.Fill the schema with actual information extracted from the job description.
+If minimum experience is not mentioned, return null.
+If information for a list is missing, return an empty list.
 Output: give me response in json and accoding to {Job_Schema}
 """
 response=Client.chat.completions.create(model=Model,messages=[{
@@ -91,11 +93,194 @@ response=Client.chat.completions.create(model=Model,messages=[{
 
 answer=response.choices[0].message.content 
 Raw_Json=json.loads(answer)
-print(Raw_Json["role"])
+job_data=Jobd(**Raw_Json)
+
+class Matchresult(BaseModel):
+    score:float
+    details:dict
+
+class Experience(BaseModel):
+    company: str | None = None
+    role: str | None = None
+    duration: str | None = None
+    description: str | None = None
+    skills_used: list[str] = []
+
+class Resume(BaseModel):
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+
+    total_experience_years: float | None = None
+
+    skills: list[str] = []
+    experiences: list[Experience] = []
+    education: list[str] = []
+    projects: list[str] = []
+    certifications: list[str] = []
+
+resume_schema = Resume.model_json_schema()
 
 
+def Parse_resume(text_file):
+    System_prompt=f"""   You are an expert resume parser.
 
-  
+    Extract information from the resume based on its meaning,
+    not only based on exact section headings.
 
+    Different resumes may use different headings.
+
+    For example:
+    - Experience
+    - Professional Experience
+    - Work History
+    - Employment
+    - Internships
+
+    These may all contain relevant experience.
+
+    Skills may also appear in the skills section, work experience,
+    internships or projects.
+
+    Return ONLY valid JSON matching this schema:
+    {resume_schema}
+
+    Important rules:
+
+    1. Do not invent information.
+    2. If a value is not available, return null.
+    3. If a list has no information, return an empty list.
+    4. Include internships inside experiences.
+    5. Extract skills mentioned across the entire resume.
+    
+    """
+    response=Client.chat.completions.create(model=Model,messages=[{
+    "role":"system",
+    "content":System_prompt
+    },{"role":"user",
+    "content":f""" parse this resume \n{text_file}"""}
+    ],response_format={
+        "type":'json_object'
+    })
+
+    answer=response.choices[0].message.content
+    raw=json.loads(answer)
+    resume_data=Resume(**raw)
+    return resume_data
+
+
+def final_score(job,resume):
+
+    match_schema = Matchresult.model_json_schema()
+    prompt = f"""
+    You are an HR recruiter.
+
+    Compare the candidate's resume with the job description.
+
+    JOB DESCRIPTION:
+    {job.model_dump_json(indent=2)}
+
+    CANDIDATE RESUME:
+    {resume.model_dump_json(indent=2)}
+    Return JSON matching this schema:
+
+    {match_schema}
+
+    Give me:
+     score for the resume and detail of the resume
+
+    Keep the response concise and easy to read.
+    """
+    message={
+        "role": "user",
+        "content" : prompt
+    }
+    messages=[message]
+    response_format={
+        "type": "json_object"
+    }
+    response = Client.chat.completions.create(model=Model, messages=messages, response_format=response_format)
+    data = json.loads(response.choices[0].message.content)
+    return Matchresult(**data)
+
+def read_pdf(file_path):
+    reader = PdfReader(file_path)
+    text = ""
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + "\n"
+    return text
+
+def read_docx(file_path):
+    document = Document(file_path)
+    text = ""
+    for paragraph in document.paragraphs:
+        if paragraph.text.strip():
+            text += paragraph.text + "\n"
+    
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                if cell.text.strip():
+                    text += cell.text + "\n"
+    return text
+
+
+def read_resume(file_path):
+    if file_path.suffix.lower() == ".pdf":
+        return read_pdf(file_path)
+    elif file_path.suffix.lower() == ".docx":
+        return read_docx(file_path)
+    else:
+        return None
+
+
+Resume_folder = Path("resumes")
+all_results = []
+
+if not Resume_folder.is_dir():
+    raise FileNotFoundError("resumes folder not found")
+
+for file_path in Resume_folder.iterdir():
+
+    if file_path.suffix.lower() not in [".pdf", ".docx"]:
+        continue
+
+    print("\nProcessing:", file_path.name)
+
+    try:
+        resume_text = read_resume(file_path)
+
+        if not resume_text or not resume_text.strip():
+            print("No readable text found")
+            continue
+
+        parsed_resume = Parse_resume(resume_text)
+
+        time.sleep(5)
+
+        result = final_score(job_data, parsed_resume)
+
+        time.sleep(5)
+
+        print("Candidate:", parsed_resume.name)
+        print("Score:", result.score)
+        
+
+        all_results.append({
+            "score":result.score,
+            "details": result.details
+        })
+
+    except Exception as e:
+        print(f"Error processing {file_path.name}: {e}")
+
+all_results.sort(
+    key=lambda candidate: candidate["score"],
+    reverse=True
+)
+
+print("\nFinal Ranking")
 
 
